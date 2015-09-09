@@ -1,0 +1,644 @@
+#include <assert.h>
+#include <string.h>
+#include <iostream>
+#include "objscip/objscip.h"
+
+#include "conshdlr_CapacityExp.h"
+#include "probdata_CapacityExp.h"
+#include "vardata_CapacityExp.h"
+#include "pricer_CapacityExp.h"
+
+using namespace scip;
+using namespace std;
+
+Objconshdlrvaccinebp::Objconshdlrvaccinebp(
+                    SCIP*                    scip,
+                    const char *             name
+
+):
+  ObjConshdlr(scip, name, "stores the local branching decisions",0 ,0, 1000, -1, 1, 1, 0, FALSE,FALSE,FALSE,
+              TRUE, SCIP_PROPTIMING_BEFORELP)
+{}
+
+Objconshdlrvaccinebp::~Objconshdlrvaccinebp()
+{}
+
+struct SCIP_ConsData
+{
+   SCIP_NODE*               node;
+   int                      nodetype;
+   int                      stage;
+   int                      state ;
+   bool                     ztype;
+   SCIP_Bool                candtype;
+   SCIP_Real                candfrac;
+   int                      vialtype;
+
+   int                     npropagatedvars;    /**< number of variables that existed, the last time, the related node was
+                                              *   propagated, used to determine whether the constraint should be
+                                              *   repropagated*/
+   int                     npropagations;      /**< stores the number propagations runs of this constraint */
+   unsigned int            propagated:1;       /**< is constraint already propagated? */
+};
+
+/** create constraint data */
+SCIP_RETCODE Objconshdlrvaccinebp::consdataCreate(
+                SCIP*                scip,
+                SCIP_CONSDATA**      consdata,  
+                SCIP_NODE*           childnode, 
+                SCIP_Bool            candtype, 
+                SCIP_Real            fracval, 
+                bool                 ztype,
+                int                  stage, 
+                int                  state, 
+                int                  nodetype,
+                int                  vialtype
+   )
+{
+   assert( scip != NULL );
+   assert( consdata != NULL );
+
+   SCIP_CALL( SCIPallocBlockMemory(scip, consdata) );
+
+
+   (*consdata)->node = childnode;
+   (*consdata)->stage = stage;
+   (*consdata)->state = state;
+   (*consdata)->nodetype = nodetype;
+   (*consdata)->ztype = ztype;
+   (*consdata)->candtype = candtype;
+   (*consdata)->candfrac = fracval;
+   (*consdata)->vialtype = vialtype;
+
+   (*consdata)->npropagatedvars = 0;
+   (*consdata)->npropagations = 0;
+   (*consdata)->propagated = FALSE;
+
+   return SCIP_OKAY;
+}
+
+/** fixes a variable to zero if the corresponding packings are not valid for this constraint/node (due to branching) */
+SCIP_RETCODE Objconshdlrvaccinebp::checkVariable(
+   SCIP*                 scip,               /**< SCIP data structure */
+   SCIP_CONSDATA*        consdata,           /**< constraint data */
+   SCIP_VAR*             var,                /**< variables to check  */
+   int*                  nfixedvars,         /**< pointer to store the number of fixed variables */
+   SCIP_Bool*            cutoff              /**< pointer to store if a cutoff was detected */
+   )
+{
+   SCIP_VARDATA* vardata;
+   SCIP_PROBDATA* probdata;
+   vector< SCIP_Real > x;
+   SCIP_Real z;
+
+   SCIP_Bool candtype;
+   int nodetype;
+   SCIP_Real frac;
+   int stage;
+   int state;
+   bool ztype;
+   int  vialtype;
+
+   SCIP_Bool fixed;
+   SCIP_Bool infeasible;
+
+   assert(scip != NULL);
+   assert(consdata != NULL);
+   assert(var != NULL);
+   assert(nfixedvars != NULL);
+   assert(cutoff != NULL);
+
+   /* if variables is locally fixed to zero continue */
+   if( SCIPvarGetUbLocal(var) < 0.0000005 )
+      return SCIP_OKAY;
+
+   /* check if the packing which corresponds to the variable feasible for this constraint */
+   vardata = SCIPvarGetData(var);
+   SCIP_CALL(SCIPvardataGetxcolumn(vardata, x));
+   z = SCIPvardataGetzcolumn(vardata);
+   stage = SCIPvardatagetstage(vardata);
+   state = SCIPvardatagetstate(vardata);
+
+
+   probdata = SCIPgetProbData(scip);
+   assert(probdata != NULL);
+  
+   vector < vector < int > > jmat;
+   SCIP_CALL(SCIPprobdatagetjmat(probdata, jmat));
+
+   nodetype = consdata->nodetype;
+   candtype = consdata->candtype;
+   frac = consdata->candfrac;
+   ztype = consdata->ztype;
+   vialtype = consdata->vialtype;
+   
+   SCIP_Real xx = x[vialtype];////////////
+   if (candtype == true && nodetype == 0 )
+   {
+	   if ((consdata->ztype==1 && state == jmat[stage-1][consdata->state]) || (consdata->ztype==0 && stage==consdata->stage && state == consdata->state))
+	   {
+		   if( z > 0 )
+		   {
+			   SCIP_CALL( SCIPfixVar(scip, var, 0.0, &infeasible, &fixed) );
+
+			   if( infeasible )
+			   {
+				   assert( SCIPvarGetLbLocal(var) > 0.5 );
+				   SCIPdebugMessage("-> cutoff\n");
+				   (*cutoff) = TRUE;
+			   }
+			   else
+			   {
+				   assert(fixed);
+				   (*nfixedvars)++;
+			   }
+		   }
+
+	   }
+   }
+   else if (candtype == true && nodetype == 1 && state == consdata->state && stage == consdata->stage)
+   {
+	   if (z < 1)
+	   {
+	        SCIP_CALL( SCIPfixVar(scip, var, 0.0, &infeasible, &fixed) );
+
+	         if( infeasible )
+	         {
+	           assert( SCIPvarGetLbLocal(var) > 0.5 );
+	           SCIPdebugMessage("-> cutoff\n");
+	           (*cutoff) = TRUE;
+	         }
+	         else
+	         {
+	          assert(fixed);
+	          (*nfixedvars)++;
+	         }
+	   }
+   }
+   else if (candtype == false && stage == consdata->stage && state == consdata->state)
+   {
+      if( (nodetype == 0 && xx > floor(frac)) || (nodetype == 1 && xx < ceil(frac)) )
+      {
+         SCIP_CALL( SCIPfixVar(scip, var, 0.0, &infeasible, &fixed) );
+
+         if( infeasible )
+         {
+           assert( SCIPvarGetLbLocal(var) > 0.5 );
+           SCIPdebugMessage("-> cutoff\n");
+           (*cutoff) = TRUE;
+         }
+        else
+        {
+          assert(fixed);
+          (*nfixedvars)++;
+        }
+      }
+   }
+
+   return SCIP_OKAY;
+}
+
+/** fixes variables to zero if the corresponding packings are not valid for this sonstraint/node (due to branching) */
+SCIP_RETCODE Objconshdlrvaccinebp::consdataFixVariables(
+   SCIP*                          scip,               /**< SCIP data structure */
+   SCIP_CONSDATA*                 consdata,           /**< constraint data */
+   vector < SCIP_VAR* >           vars,               /**< generated variables */
+   int                            nvars,              /**< number of generated variables */
+   SCIP_RESULT*                   result              /**< pointer to store the result of the fixing */
+   )
+{
+   int nfixedvars;
+   int v;
+   SCIP_Bool cutoff;
+
+   nfixedvars = 0;
+   cutoff = FALSE;
+
+   SCIPdebugMessage("check variables %d to %d\n", consdata->npropagatedvars, nvars);
+
+   for( v = consdata->npropagatedvars; v < nvars && !cutoff; ++v )
+   {
+      SCIP_CALL( checkVariable(scip, consdata, vars[v], &nfixedvars, &cutoff) );
+   }
+
+   SCIPdebugMessage("fixed %d variables locally\n", nfixedvars);
+
+   if( cutoff )
+      *result = SCIP_CUTOFF;
+   else if( nfixedvars > 0 )
+      *result = SCIP_REDUCEDDOM;
+
+   return SCIP_OKAY;
+}
+
+SCIP_RETCODE Objconshdlrvaccinebp::consdataFree(
+   SCIP*                 scip,               /**< SCIP data structure */
+   SCIP_CONSDATA**       consdata            /**< pointer to the constraint data */
+   )
+{
+   assert(consdata != NULL);
+   assert(*consdata != NULL);
+
+   SCIPfreeBlockMemory(scip, consdata);
+
+   return SCIP_OKAY;
+}
+
+//Callback Methods 
+SCIP_DECL_CONSDELETE(Objconshdlrvaccinebp::scip_delete)
+{
+   assert(conshdlr != NULL);
+   assert(strcmp(SCIPconshdlrGetName(conshdlr), "vaccinebp_Conshdlr") == 0);
+   assert(consdata != NULL);
+   assert(*consdata != NULL);
+
+   /* free LP row and logic or constraint */
+   SCIP_CALL( consdataFree(scip, consdata) );
+
+   SCIPfreeMemory(scip, consdata);
+
+   return SCIP_OKAY;
+}
+
+
+/** transforms constraint data into data belonging to the transformed problem */
+SCIP_DECL_CONSTRANS(Objconshdlrvaccinebp::scip_trans)
+{
+   SCIP_CONSDATA* sourcedata = NULL;
+   SCIP_CONSDATA* targetdata = NULL;
+
+   assert(conshdlr != NULL);
+   assert(strcmp(SCIPconshdlrGetName(conshdlr), "vaccinebp_Conshdlr") == 0);
+   assert(SCIPgetStage(scip) == SCIP_STAGE_TRANSFORMING);
+   assert(sourcecons != NULL);
+   assert(targetcons != NULL);
+
+   sourcedata = SCIPconsGetData(sourcecons);
+   assert(sourcedata != NULL);
+
+   Objconshdlrvaccinebp::consdataCreate(scip, &targetdata, sourcedata->node, sourcedata->candtype, sourcedata->candfrac, 
+                                      sourcedata->ztype, sourcedata->stage, sourcedata->state, sourcedata->nodetype, sourcedata->vialtype);
+
+   /* create target constraint */
+   SCIP_CALL( SCIPcreateCons(scip, targetcons, SCIPconsGetName(sourcecons), conshdlr, targetdata,
+         SCIPconsIsInitial(sourcecons), SCIPconsIsSeparated(sourcecons), SCIPconsIsEnforced(sourcecons),
+         SCIPconsIsChecked(sourcecons), SCIPconsIsPropagated(sourcecons),  SCIPconsIsLocal(sourcecons),
+         SCIPconsIsModifiable(sourcecons), SCIPconsIsDynamic(sourcecons), SCIPconsIsRemovable(sourcecons),
+         SCIPconsIsStickingAtNode(sourcecons)) );
+
+   return SCIP_OKAY;
+}
+
+// separation method of constraint handler for LP solution
+SCIP_DECL_CONSSEPALP(Objconshdlrvaccinebp::scip_sepalp)
+{
+  *result = SCIP_FEASIBLE;
+  return SCIP_OKAY;
+}
+
+// separation method of constraint handler for arbitrary primal solution
+SCIP_DECL_CONSSEPASOL(Objconshdlrvaccinebp::scip_sepasol)
+{
+   *result = SCIP_FEASIBLE;
+   return SCIP_OKAY;
+}
+
+// constraint enforcing method of constraint handler for LP solutions
+SCIP_DECL_CONSENFOLP(Objconshdlrvaccinebp::scip_enfolp)
+{
+  *result = SCIP_FEASIBLE;
+  return SCIP_OKAY;
+}
+
+//constraint enforcing method of constraint handler for pseudo solutions
+SCIP_DECL_CONSENFOPS(Objconshdlrvaccinebp::scip_enfops)
+{
+   *result = SCIP_FEASIBLE;
+   return SCIP_OKAY;
+}
+
+//feasibility check method of constraint handler for primal solutions
+SCIP_DECL_CONSCHECK(Objconshdlrvaccinebp::scip_check)
+{
+   *result = SCIP_FEASIBLE;
+    return SCIP_OKAY;
+}
+
+//variable rounding lock method of constraint handler
+SCIP_DECL_CONSLOCK(Objconshdlrvaccinebp::scip_lock)
+{
+  return SCIP_OKAY;
+}
+
+/** domain propagation method of constraint handler */
+SCIP_DECL_CONSPROP(Objconshdlrvaccinebp::scip_prop)
+{
+   SCIP_PROBDATA* probdata;
+   SCIP_CONSDATA* consdata;
+
+   vector< SCIP_VAR*> vars;
+   int nvars;
+   int c;
+
+   assert(scip != NULL);
+   assert(strcmp(SCIPconshdlrGetName(conshdlr), "vaccinebp_Conshdlr") == 0);
+
+   SCIPdebugMessage("propagation constraints of constraint handler vaccinebp_Conshdlr\n");
+
+   probdata = SCIPgetProbData(scip);
+   assert(probdata != NULL);
+
+   SCIP_CALL( SCIPprobdataGetVars(probdata,vars));
+   nvars = SCIPprobdataGetNVars(probdata);
+
+   *result = SCIP_DIDNOTFIND;
+   for( c = 0; c < nconss; ++c )
+   {
+      consdata = SCIPconsGetData(conss[c]);
+
+/*#ifndef NDEBUG
+      {
+         // check if there are no equal consdatas 
+         SCIP_CONSDATA* consdata2;
+         int i;
+
+         for( i = c+1; i < nconss; ++i )
+         {
+            consdata2 = SCIPconsGetData(conss[i]);
+            assert( !(consdata->itemid1 == consdata2->itemid1
+                  && consdata->itemid2 == consdata2->itemid2
+                  && consdata->type == consdata2->type) );
+            assert( !(consdata->itemid1 == consdata2->itemid2
+                  && consdata->itemid2 == consdata2->itemid1
+                  && consdata->type == consdata2->type) );
+         }
+      }
+#endif*/
+
+      if( !consdata->propagated )
+      {
+         SCIPdebugMessage("propagate constraint <%s> ", SCIPconsGetName(conss[c]));
+         //SCIPdebug( consdataPrint(scip, consdata, NULL) );
+
+         SCIP_CALL( consdataFixVariables(scip, consdata, vars, nvars, result) );
+         consdata->npropagations++;
+
+         if( *result != SCIP_CUTOFF )
+         {
+            consdata->propagated = TRUE;
+            consdata->npropagatedvars = nvars;
+         }
+         else
+            break;
+      }
+
+      /* check if constraint is completely propagated */
+      //assert( consdataCheck(scip, probdata, consdata) );
+   }
+
+   return SCIP_OKAY;
+}
+
+/** variable rounding lock method of constraint handler */
+//#define consLockSamediff NULL
+
+SCIP_DECL_CONSACTIVE(Objconshdlrvaccinebp::scip_active)
+{
+
+   SCIP_CONSDATA* consdata;
+
+   assert(scip != NULL);
+   assert(strcmp(SCIPconshdlrGetName(conshdlr), "vaccinebp_Conshdlr") == 0);
+   assert(cons != NULL);
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+   assert(consdata->npropagatedvars <= SCIPprobdataGetNVars(SCIPgetProbData(scip)));
+
+   //SCIPdebugMessage("activate constraint <%s> at node <%"SCIP_LONGINT_FORMAT"> in depth <%d>: ",
+      //SCIPconsGetName(cons), SCIPnodeGetNumber(consdata->node), SCIPnodeGetDepth(consdata->node));
+   //SCIPdebug( consdataPrint(scip, consdata, NULL) );
+
+   if( consdata->npropagatedvars != SCIPprobdataGetNVars(SCIPgetProbData(scip)) )
+   {
+      SCIPdebugMessage("-> mark constraint to be repropagated\n");
+      consdata->propagated = FALSE;
+      SCIP_CALL( SCIPrepropagateNode(scip, consdata->node) );
+   }
+
+   //Applying changes to the pricing problem 
+   /*SCIP_PROBDATA* probdata;
+   probdata = SCIPgetProbData(scip);
+   vector < vector < int > > jmat;
+   SCIP_CALL ( SCIPprobdatagetjmat (probdata, jmat));
+   ObjPricervaccinebp* mypricer;
+   mypricer = (ObjPricervaccinebp*)(SCIPfindObjPricer(scip, "vaccinebp_Pricer"));
+   if (consdata->candtype == true && consdata->nodetype == 0)
+    {
+      for (int t=2; t < SCIPprobdataGetT(probdata)+1 ; t++)
+       { 
+         mypricer->SCIPchangepricerub(scip, consdata->candtype, consdata-> vial_type, t , jmat[t-1][consdata->state] , 0.0 );
+       }
+     }
+   else if (consdata->candtype == true && consdata->nodetype == 1)
+    {  
+     mypricer->SCIPchangepricerlb(scip, consdata->candtype, consdata-> vial_type, consdata->stage , consdata->state , 1.0 ); 
+    }
+   else if (consdata->candtype == false && consdata->nodetype == 0)
+   {
+     mypricer->SCIPchangepricerub(scip, consdata->candtype, consdata-> vial_type ,consdata->stage , consdata->state , floor(consdata-> candfrac) );
+   }
+   else if (consdata->candtype == false && consdata->nodetype == 1)
+   {     
+     mypricer->SCIPchangepricerlb(scip, consdata->candtype, consdata-> vial_type ,consdata->stage , consdata->state , ceil(consdata-> candfrac) );  
+   }*/
+
+   return SCIP_OKAY;
+
+}
+
+SCIP_DECL_CONSDEACTIVE(Objconshdlrvaccinebp::scip_deactive)
+{
+   SCIP_CONSDATA* consdata;
+   SCIP_PROBDATA* probdata;
+
+   assert(scip != NULL);
+   assert(strcmp(SCIPconshdlrGetName(conshdlr), "vaccinebp_Conshdlr") == 0);
+   assert(cons != NULL);
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+   assert(consdata->propagated || SCIPgetNChildren(scip) == 0);
+
+   probdata = SCIPgetProbData(scip);
+   assert(probdata != NULL);
+
+   /* check if all variables which are not fixed locally to zero are valid for this constraint/node */
+   //assert( consdataCheck(scip, probdata, consdata) );
+
+   //SCIPdebugMessage("deactivate constraint <%s> at node <%"SCIP_LONGINT_FORMAT"> in depth <%d>: ",
+      //SCIPconsGetName(cons), SCIPnodeGetNumber(consdata->node), SCIPnodeGetDepth(consdata->node));
+  // SCIPdebug( consdataPrint(scip, consdata, NULL) );
+
+   /* set the number of propagated variables to current number of variables is SCIP */
+   consdata->npropagatedvars = SCIPprobdataGetNVars(probdata);
+
+   /* check if all variables are valid for this constraint */
+   //assert( consdataCheck(scip, probdata, consdata) );
+
+   return SCIP_OKAY;
+}
+/** constraint display method of constraint handler */
+/*SCIP_DECL_CONSPRINT(scip_print)	
+
+{  /*lint --e{715}
+   SCIP_CONSDATA*  consdata;
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+
+   //consdataPrint(scip, consdata, file);
+
+   return SCIP_OKAY;
+}*/
+
+SCIP_RETCODE Objconshdlrvaccinebp::SCIPcreateconshdlr(
+                SCIP*                scip, 
+                SCIP_CONS**          cons,               /**< pointer to hold the created constraint */
+                const char*          name,  
+                SCIP_NODE*           childnode, 
+                SCIP_Bool            candtype, 
+                SCIP_Real            fracval, 
+                bool                 ztype,
+                int                  stage, 
+                int                  state, 
+                int                  nodetype,
+                int                  vialtype)
+{
+   /* find the subtour constraint handler */
+   SCIP_CONSHDLR* conshdlr;
+   conshdlr = SCIPfindConshdlr(scip, "vaccinebp_Conshdlr");
+   SCIP_CONSDATA* consdata; //= new SCIP_CONSDATA;
+   
+   if( conshdlr == NULL )
+   {
+      SCIPerrorMessage("vaccinebp constraint handler not found\n");
+      return SCIP_PLUGINNOTFOUND;
+   }
+   /* create constraint data */
+   consdataCreate(scip, &consdata, childnode, candtype, fracval, ztype, stage, state, nodetype, vialtype);
+
+   SCIP_CALL( SCIPcreateCons(scip, cons, name, conshdlr, consdata, FALSE, FALSE, FALSE, FALSE, TRUE,
+         TRUE, FALSE, FALSE, FALSE, TRUE) );
+
+   SCIPdebugMessage("created constraint: ");
+   //SCIPdebug( consdataPrint(scip, consdata, NULL) );
+
+   return SCIP_OKAY;
+}
+
+/** returns node type */
+int Objconshdlrvaccinebp::SCIPgetnodetype(
+   SCIP*                 scip,               /**< SCIP data structure */
+   SCIP_CONS*            cons                /**< samediff constraint */
+   )
+{
+   SCIP_CONSDATA* consdata;
+
+   assert(cons != NULL);
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+
+   return consdata->nodetype;
+}
+/** returns stage */
+int Objconshdlrvaccinebp::SCIPgetstage(
+   SCIP*                 scip,               /**< SCIP data structure */
+   SCIP_CONS*            cons                /**< samediff constraint */
+   )
+{
+   SCIP_CONSDATA* consdata;
+
+   assert(cons != NULL);
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+
+   return consdata->stage;
+}
+/** returns state */
+int Objconshdlrvaccinebp::SCIPgetstate(
+   SCIP*                 scip,               /**< SCIP data structure */
+   SCIP_CONS*            cons                /**< samediff constraint */
+   )
+{
+   SCIP_CONSDATA* consdata;
+
+   assert(cons != NULL);
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+
+   return consdata->state;
+}
+
+/** returns vial type */
+bool Objconshdlrvaccinebp::SCIPgetztype(
+   SCIP*                 scip,               /**< SCIP data structure */
+   SCIP_CONS*            cons                /**< samediff constraint */
+   )
+{
+   SCIP_CONSDATA* consdata;
+
+   assert(cons != NULL);
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+
+   return consdata->ztype;
+}
+/** returns cand type */
+int Objconshdlrvaccinebp::SCIPgetcandtype(
+   SCIP*                 scip,               /**< SCIP data structure */
+   SCIP_CONS*            cons                /**< samediff constraint */
+   )
+{
+   SCIP_CONSDATA* consdata;
+
+   assert(cons != NULL);
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+
+   return consdata->candtype;
+}
+/** returns cand frac*/
+SCIP_Real Objconshdlrvaccinebp::SCIPgetcandfrac(
+   SCIP*                 scip,               /**< SCIP data structure */
+   SCIP_CONS*            cons                /**< samediff constraint */
+   )
+{
+   SCIP_CONSDATA* consdata;
+
+   assert(cons != NULL);
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+
+   return consdata->candfrac;
+}
+int Objconshdlrvaccinebp::SCIPgetvialtype(
+   SCIP*                 scip,               /**< SCIP data structure */
+   SCIP_CONS*            cons                /**< samediff constraint */
+   )
+{
+   SCIP_CONSDATA* consdata;
+
+   assert(cons != NULL);
+
+   consdata = SCIPconsGetData(cons);
+   assert(consdata != NULL);
+
+   return consdata->vialtype;
+}
